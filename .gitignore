@@ -1,0 +1,80 @@
+# ========================
+# ENVIRONMENT & SECRETS
+# ========================
+.env
+.env.*
+!.env.example
+
+# ========================
+# PYTHON / BACKEND
+# ========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.egg
+*.egg-info/
+dist/
+build/
+*.so
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# ML model weights (large binary files)
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.pkl
+*.bin
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs & temp
+*.log
+*.tmp
+tmp/
+temp/
+
+# ========================
+# NODE / FRONTEND
+# ========================
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Vite cache
+.vite/
+
+# ========================
+# OS FILES
+# ========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ========================
+# IDE / EDITOR
+# ========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+
+# ========================
+# MISC
+# ========================
+*.zip
+*.tar.gz
+main_old.py

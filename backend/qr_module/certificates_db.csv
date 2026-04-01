@@ -1,0 +1,4 @@
+cert_id,name,course,status
+ABC123,Allison Daniel,AI Security,valid
+XYZ999,John Smith,Web Development,revoked
+LMN456,Emily Clark,Data Science,valid
