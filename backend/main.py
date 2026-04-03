@@ -437,6 +437,113 @@ def is_likely_scam_page(html_text: str, page_title: str, final_url: str,
         return {"is_scam": False, "confidence": "LOW", "signals": signals}
 
 
+
+# ============================================================
+# COURSERA CERTIFICATE SCRAPER (platform-specific)
+# ============================================================
+
+def verify_coursera_url(url: str, expected_name: str = "") -> dict:
+    """
+    Coursera-specific verification using ALT text scraping.
+    Coursera embed a description like "Certificate earned by <NAME>" in an img alt attribute.
+    Returns same shape as check_url_valid so it plugs into the pipeline directly.
+    """
+    from urllib.parse import urlparse as _urlparse
+
+    base = {
+        "url": url, "valid": False, "status_code": None,
+        "redirected_to": None, "ssl_warning": None,
+        "error": None, "scam_analysis": None,
+        "platform_check": {"platform": "coursera", "method": None, "name_matched": None},
+    }
+
+    # Domain guard
+    parsed = _urlparse(url)
+    if parsed.netloc.lower().replace("www.", "") != "coursera.org":
+        base["error"] = "Not a Coursera domain"
+        return base
+
+    # Must have a verify path with a cert ID
+    cert_id_match = re.search(r"/verify/([A-Z0-9]+)", url, re.I)
+    if not cert_id_match:
+        base["error"] = "No certificate ID found in Coursera URL"
+        return base
+
+    # Fetch with retries
+    session = make_session(verify_ssl=False)
+    resp = None
+    for attempt in range(3):
+        try:
+            resp = session.get(url, timeout=20, allow_redirects=True)
+            if resp.status_code == 200:
+                break
+            resp = None
+        except Exception:
+            import time
+            time.sleep(1)
+
+    if resp is None or resp.status_code != 200:
+        base["status_code"] = resp.status_code if resp else None
+        base["error"] = f"Failed to fetch Coursera page (HTTP {resp.status_code if resp else 'timeout'})"
+        return base
+
+    base["status_code"] = 200
+    base["redirected_to"] = resp.url if resp.url != url else None
+
+    soup = BeautifulSoup(resp.content, "html.parser")
+
+    # Method 1: ALT text on certificate image
+    alt_text = ""
+    for img in soup.find_all("img"):
+        alt = img.get("alt", "")
+        if "certificate" in alt.lower():
+            alt_text = alt
+            break
+
+    if alt_text:
+        base["platform_check"]["method"] = "alt_text"
+        base["platform_check"]["alt_text"] = alt_text
+        if expected_name:
+            try:
+                from fuzzywuzzy import fuzz
+                matched = fuzz.partial_ratio(expected_name.lower(), alt_text.lower()) >= 80
+            except ImportError:
+                matched = expected_name.lower() in alt_text.lower()
+            base["platform_check"]["name_matched"] = matched
+            if matched:
+                base["valid"] = True
+                base["platform_check"]["verdict"] = "NAME_CONFIRMED"
+            else:
+                base["valid"] = False
+                base["error"] = f"Name on certificate page does not match: expected '{expected_name}', page says '{alt_text[:100]}'"
+                base["platform_check"]["verdict"] = "NAME_MISMATCH"
+        else:
+            # No name to check — just confirm the page loaded a real certificate
+            base["valid"] = True
+            base["platform_check"]["verdict"] = "PAGE_LOADED_NO_NAME_CHECK"
+        return base
+
+    # Method 2: Fallback — check page title / meta for certificate signals
+    title = soup.title.string if soup.title else ""
+    meta_desc = ""
+    for m in soup.find_all("meta"):
+        if m.get("name", "").lower() == "description":
+            meta_desc = m.get("content", "")
+            break
+
+    page_text = (title + " " + meta_desc).lower()
+    if "certificate" in page_text and "coursera" in page_text:
+        base["valid"] = True
+        base["platform_check"]["method"] = "meta_fallback"
+        base["platform_check"]["verdict"] = "PAGE_LOOKS_VALID_NO_NAME_CHECK"
+    else:
+        base["valid"] = False
+        base["error"] = "Coursera page did not contain a valid certificate (no alt text or meta description)"
+        base["platform_check"]["method"] = "meta_fallback"
+        base["platform_check"]["verdict"] = "NO_CERTIFICATE_FOUND"
+
+    return base
+
 def check_url_valid(url: str, expected_name: str = "", expected_issuer: str = "") -> dict:
     # Step 1: Format validation
     fmt = validate_url_format(url)
@@ -448,13 +555,17 @@ def check_url_valid(url: str, expected_name: str = "", expected_issuer: str = ""
         }
     url = fmt["cleaned_url"]
 
-    # Step 2: Bot-blocking domains
+    # Step 2: Platform-specific handlers
     if "credly.com" in url:
         return {
             "url": url, "valid": None, "status_code": None, "redirected_to": None,
             "note": "Credly blocks automated access — verify manually at credly.com",
             "scam_analysis": None,
         }
+
+    # Coursera has a reliable scrape-based verifier — use it instead of generic check
+    if "coursera.org" in url and "/verify/" in url:
+        return verify_coursera_url(url, expected_name=expected_name)
 
     # Step 3: Expand short URLs
     expanded = transform_short_url(url)
@@ -565,7 +676,7 @@ def extract_urls_from_groq_text(raw_text: str, groq_urls: list) -> list:
 UDEMY_DB_PATH = BASE_DIR / "udemy_certificates.db"
 
 # Regex to pull a UC-xxxx style Udemy cert ID from any string
-UDEMY_CERT_ID_RE = re.compile(r"UC-[0-9a-f\-]{30,}", re.IGNORECASE)
+UDEMY_CERT_ID_RE = re.compile(r"UC-[0-9a-fA-F\-]{35,45}", re.IGNORECASE)
 
 def is_udemy_certificate(cert_info: dict) -> bool:
     """Return True if the certificate is from Udemy."""
@@ -576,56 +687,87 @@ def is_udemy_certificate(cert_info: dict) -> bool:
 
 def extract_udemy_cert_id(cert_info: dict) -> str | None:
     """
-    Pull the UC-xxxx certificate number from:
-      1. cert_info['cert_id'] (already parsed by vision)
-      2. cert_info['urls']    (e.g. ude.my/UC-xxx)
-      3. cert_info['raw_text'] (regex fallback)
-    Returns the ID string or None.
+    Pull the UC-xxxx certificate number. Priority order:
+      1. URLs list — most reliable (e.g. ude.my/UC-xxx or udemy.com/certificate/UC-xxx)
+      2. raw_text regex — scans full OCR output
+      3. cert_info['cert_id'] — last resort, vision OCR can misread long hex IDs
+    Returns the canonicalised ID (lowercase hex, UC- prefix preserved).
     """
-    # Option 1: vision already extracted it
-    cert_id = cert_info.get("cert_id", "")
-    if cert_id and UDEMY_CERT_ID_RE.match(cert_id):
-        return cert_id.upper() if not cert_id.startswith("UC-") else cert_id
+    def canonicalise(s: str) -> str:
+        # Keep UC- prefix, lowercase the hex portion only
+        if s.upper().startswith("UC-"):
+            return "UC-" + s[3:].lower()
+        return s.lower()
 
-    # Option 2: scan URLs list
+    all_candidates = []
+
+    # Option 1: URLs are most reliable
     for url in cert_info.get("urls", []):
         m = UDEMY_CERT_ID_RE.search(url)
         if m:
-            return m.group(0)
+            all_candidates.append(canonicalise(m.group(0)))
 
-    # Option 3: regex over raw OCR text
+    # Option 2: raw OCR text (may contain multiple UC- ids — collect all)
     raw = cert_info.get("raw_text", "")
-    m = UDEMY_CERT_ID_RE.search(raw)
-    if m:
-        return m.group(0)
+    for m in UDEMY_CERT_ID_RE.finditer(raw):
+        all_candidates.append(canonicalise(m.group(0)))
 
-    return None
+    # Option 3: vision-parsed cert_id field
+    cert_id = cert_info.get("cert_id", "")
+    if cert_id and UDEMY_CERT_ID_RE.match(cert_id):
+        all_candidates.append(canonicalise(cert_id))
+
+    if not all_candidates:
+        return None
+
+    # If all candidates agree — great. If they differ, pick the one that appears most.
+    from collections import Counter
+    most_common, _ = Counter(all_candidates).most_common(1)[0]
+    return most_common
 
 
 def fuzzy_name_match(name_a: str, name_b: str, threshold: float = 0.6) -> bool:
     """
-    Simple token-overlap fuzzy match — no external libs needed.
-    Returns True if enough name tokens overlap.
+    Name matching using fuzzywuzzy partial_ratio if available,
+    falling back to token-overlap. Handles OCR variations and middle-name differences.
     """
+    if not name_a or not name_b:
+        return False
+    try:
+        from fuzzywuzzy import fuzz
+        return fuzz.partial_ratio(name_a.lower(), name_b.lower()) >= 80
+    except ImportError:
+        pass
     a_tokens = set(name_a.lower().split())
     b_tokens = set(name_b.lower().split())
-    if not a_tokens or not b_tokens:
-        return False
     overlap = len(a_tokens & b_tokens)
-    # Match if overlap covers >threshold of the shorter name
     return overlap / min(len(a_tokens), len(b_tokens)) >= threshold
 
 
-def fuzzy_course_match(course_a: str, course_b: str, threshold: float = 0.4) -> bool:
-    """Token-overlap match for course names (more lenient)."""
-    # Strip version years like [2022], (2023)
-    clean = re.sub(r"[\[\(]\d{4}[\]\)]", "", course_a + " " + course_b).lower()
-    a_tokens = set(re.findall(r"[a-z]+", course_a.lower()))
-    b_tokens = set(re.findall(r"[a-z]+", course_b.lower()))
-    # Remove common stop words
-    stops = {"the", "a", "an", "and", "or", "of", "in", "for", "to", "with", "from"}
-    a_tokens -= stops
-    b_tokens -= stops
+def fuzzy_course_match(course_a: str, course_b: str, threshold: float = 0.45) -> bool:
+    """
+    Course name matching using fuzzywuzzy partial_ratio if available,
+    falling back to token-overlap. Strips year markers before comparing.
+    """
+    def clean(s):
+        s = re.sub(r"[\[\(]\d{4}[\]\)]", "", s)   # strip [2022], (2023)
+        s = re.sub(r"[^a-z0-9 ]", " ", s.lower())     # keep alphanumeric only
+        return s.strip()
+
+    ca, cb = clean(course_a), clean(course_b)
+    if not ca or not cb:
+        return False
+
+    try:
+        from fuzzywuzzy import fuzz
+        return fuzz.partial_ratio(ca, cb) >= 70
+    except ImportError:
+        pass
+
+    # Token-overlap fallback
+    stops = {"the", "a", "an", "and", "or", "of", "in", "for", "to", "with", "from", "2021", "2022", "2023"}
+    a_tokens = set(ca.split()) - stops
+    b_tokens = set(cb.split()) - stops
     if not a_tokens or not b_tokens:
         return False
     overlap = len(a_tokens & b_tokens)
@@ -674,10 +816,10 @@ def udemy_db_verify(cert_info: dict) -> dict:
         cur = conn.cursor()
         db_row = None
 
-        # ---- Primary lookup: by certificate_number ----
+        # ---- Primary lookup: by certificate_number (case-insensitive hex) ----
         if cert_id:
             cur.execute(
-                "SELECT * FROM udemy_certificates WHERE certificate_number = ? COLLATE NOCASE",
+                "SELECT * FROM udemy_certificates WHERE LOWER(certificate_number) = LOWER(?)",
                 (cert_id,)
             )
             db_row = cur.fetchone()
