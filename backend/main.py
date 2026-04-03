@@ -1093,6 +1093,113 @@ async def analyze_links(file: UploadFile = File(...)):
         except: pass
 
 
+# ============================================================
+# UDEMY STANDALONE ENDPOINT
+# ============================================================
+
+@app.post("/api/analyze/udemy")
+async def analyze_udemy(file: UploadFile = File(...)):
+    """
+    Dedicated Udemy DB verification endpoint.
+    Extracts certificate fields via Groq Vision, then queries
+    the local SQLite DB — no AI person-verify needed.
+    """
+    if not GROQ_API_KEY:
+        raise HTTPException(status_code=503, detail="GROQ_API_KEY not set in .env")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
+
+    try:
+        cert_info    = groq_vision_extract(tmp_path)
+        udemy_result = udemy_db_verify(cert_info)
+
+        if not udemy_result["is_udemy"]:
+            return {
+                "verified": False,
+                "db_verified": False,
+                "verdict": "NOT_UDEMY",
+                "message": "This certificate does not appear to be from Udemy.",
+                "certificate": {
+                    "name":    cert_info.get("name"),
+                    "course":  cert_info.get("course"),
+                    "cert_id": cert_info.get("cert_id"),
+                    "issuer":  cert_info.get("issuer"),
+                },
+                "data": {},
+            }
+
+        verified  = udemy_result["verdict"] == "VERIFIED"
+        db_record = udemy_result.get("db_record") or {}
+
+        return {
+            "verified":          verified,
+            "db_verified":       verified,
+            "verdict":           udemy_result["verdict"],
+            "message":           udemy_result["reason"],
+            "cert_id_extracted": udemy_result.get("cert_id_extracted"),
+            "name_match":        udemy_result.get("name_match"),
+            "course_match":      udemy_result.get("course_match"),
+            "certificate": {
+                "name":    cert_info.get("name"),
+                "course":  cert_info.get("course"),
+                "cert_id": cert_info.get("cert_id"),
+                "issuer":  cert_info.get("issuer"),
+            },
+            "data": db_record,
+        }
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+# ============================================================
+# QR ISSUER VERIFICATION ENDPOINT  (replaces separate issuer_api.py)
+# ============================================================
+
+import csv as _csv
+
+def _load_cert_db() -> dict:
+    """Load qr_module/certificates_db.csv into a dict keyed by cert_id."""
+    db_path = BASE_DIR / "qr_module" / "certificates_db.csv"
+    records: dict = {}
+    try:
+        with open(db_path, newline="", encoding="utf-8") as f:
+            for row in _csv.DictReader(f):
+                records[row["cert_id"].strip()] = row
+    except Exception as e:
+        print(f"[QR DB] Could not load certificates_db.csv: {e}")
+    return records
+
+_CERT_DB: dict = _load_cert_db()
+
+
+@app.get("/api/verify")
+def verify_certificate(cert_id: str):
+    """
+    Issuer verification endpoint consumed by the QR module.
+    Previously lived in qr_module/issuer_api.py as a separate FastAPI server;
+    now mounted on the main app so it is always reachable on the same port.
+    """
+    record = _CERT_DB.get(cert_id.strip())
+    if not record:
+        return {
+            "issuer":  "DocGuard Authority",
+            "cert_id": cert_id,
+            "status":  "not_found",
+        }
+    return {
+        "issuer":  "DocGuard Authority",
+        "cert_id": record["cert_id"],
+        "name":    record.get("name", ""),
+        "course":  record.get("course", ""),
+        "status":  record.get("status", "not_found"),
+    }
+
+
 @app.post("/api/analyze/qr")
 async def analyze_qr(file: UploadFile = File(...)):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
