@@ -152,9 +152,28 @@ def groq_vision_extract(img_path: str) -> dict:
         }]
     }
     session = make_session(verify_ssl=False)
-    resp = session.post(GROQ_API_URL, headers=groq_headers(), json=payload, timeout=40)
-    resp.raise_for_status()
-    raw = resp.json()["choices"][0]["message"]["content"]
+
+    # Retry up to 3 times with increasing timeouts
+    last_error = None
+    raw = ""
+    for attempt, timeout in enumerate([30, 50, 70], start=1):
+        try:
+            resp = session.post(GROQ_API_URL, headers=groq_headers(), json=payload, timeout=timeout)
+            resp.raise_for_status()
+            raw = resp.json()["choices"][0]["message"]["content"]
+            break
+        except Exception as e:
+            last_error = e
+            print(f"[Groq Vision] attempt {attempt} failed: {e}")
+            if attempt < 3:
+                import time; time.sleep(2)
+    else:
+        # All retries exhausted — return safe empty result instead of crashing
+        return {
+            "name": "", "course": "", "date": "", "cert_id": "",
+            "issuer": "", "urls": [], "raw_text": "",
+            "_groq_error": str(last_error),
+        }
 
     result = {"name": "", "course": "", "date": "", "cert_id": "", "issuer": "", "urls": [], "raw_text": raw}
     for line in raw.splitlines():
@@ -980,6 +999,22 @@ async def analyze_links(file: UploadFile = File(...)):
         # Stage 1: Extract certificate fields via Groq Vision
         cert_info = groq_vision_extract(tmp_path)
 
+        # If Groq timed out on all retries, return a clean JSON error
+        if cert_info.get("_groq_error"):
+            return {
+                "certificate": {"name": "", "course": "", "date": "", "cert_id": "", "issuer": ""},
+                "url_verification": {"urls_found": 0, "url_status": "NO_URLS_FOUND",
+                                     "valid_count": 0, "invalid_count": 0,
+                                     "blocked_count": 0, "scam_count": 0, "details": []},
+                "udemy_db_verification": None,
+                "person_verification": {"issuer_legitimate": "UNKNOWN", "course_exists": "UNKNOWN",
+                                        "person_found": "UNKNOWN", "verdict": "UNVERIFIABLE",
+                                        "reason": "Groq Vision API timed out. Please retry in a moment.",
+                                        "powered_by": "Groq", "skipped": False},
+                "final_verdict": "UNVERIFIABLE",
+                "final_reason": f"Groq Vision API connection failed: {cert_info['_groq_error'][:200]}",
+            }
+
         # Stage 2: URL format check + HTTP check + scam detection (parallel)
         all_urls = extract_urls_from_groq_text(cert_info["raw_text"], cert_info["urls"])
         url_results = check_all_urls_parallel(
@@ -1088,6 +1123,22 @@ async def analyze_links(file: UploadFile = File(...)):
             "final_reason":  final_reason,
         }
 
+    except HTTPException:
+        raise
+    except Exception as exc:
+        return {
+            "certificate": {"name": "", "course": "", "date": "", "cert_id": "", "issuer": ""},
+            "url_verification": {"urls_found": 0, "url_status": "NO_URLS_FOUND",
+                                 "valid_count": 0, "invalid_count": 0,
+                                 "blocked_count": 0, "scam_count": 0, "details": []},
+            "udemy_db_verification": None,
+            "person_verification": {"issuer_legitimate": "UNKNOWN", "course_exists": "UNKNOWN",
+                                    "person_found": "UNKNOWN", "verdict": "UNVERIFIABLE",
+                                    "reason": str(exc)[:300],
+                                    "powered_by": "Groq", "skipped": False},
+            "final_verdict": "UNVERIFIABLE",
+            "final_reason": f"Internal error: {str(exc)[:200]}",
+        }
     finally:
         try: os.unlink(tmp_path)
         except: pass

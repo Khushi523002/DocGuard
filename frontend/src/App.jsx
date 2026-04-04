@@ -646,30 +646,6 @@ function QrResult({ d }) {
         </div>
       )}
 
-      {/* Field similarity bars */}
-      {d.comparison?.similarity_scores && (
-        <div style={{ background: G.bg2, borderRadius: 12, padding: '14px 16px' }}>
-          <div style={{ fontSize: 10, fontFamily: G.mono, color: G.t2, letterSpacing: '0.1em', marginBottom: 14 }}>FIELD MATCH SCORES</div>
-          {Object.entries(d.comparison.similarity_scores).map(([field, score]) => {
-            const pct = Math.round(score * 100)
-            const col = pct >= 80 ? G.green : pct >= 50 ? G.amber : G.red
-            return (
-              <div key={field} style={{ marginBottom: 12 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, fontFamily: G.mono, marginBottom: 6 }}>
-                  <span style={{ color: G.t2, letterSpacing: '0.05em' }}>{field.toUpperCase()}</span>
-                  <span style={{ color: col, fontWeight: 600 }}>{pct}%</span>
-                </div>
-                <Bar pct={pct} color={col} height={4} />
-              </div>
-            )
-          })}
-          {d.comparison.mismatched_fields?.length > 0 && (
-            <div style={{ marginTop: 8, fontSize: 11, color: G.red, fontFamily: G.mono }}>
-              ⚠ Mismatch: {d.comparison.mismatched_fields.join(', ')}
-            </div>
-          )}
-        </div>
-      )}
 
       {/* Error/info */}
       {d.qr_result?.error && (
@@ -948,8 +924,11 @@ export default function App() {
       const fd = new FormData()
       fd.append('file', file)
       const r = await fetch(`/api/analyze/${endpoint}`, { method: 'POST', body: fd })
-      const data = await r.json()
-      setSteps(s => ({ ...s, [key]: r.ok ? data : { error: data.detail || 'Request failed' } }))
+      const text = await r.text()
+      let data
+      try { data = JSON.parse(text) }
+      catch { data = { error: r.ok ? 'Unexpected server response — please retry' : `Server error ${r.status}: please retry in a moment` } }
+      setSteps(s => ({ ...s, [key]: r.ok ? data : { error: data.detail || data.error || 'Request failed' } }))
     } catch (e) {
       setSteps(s => ({ ...s, [key]: { error: e.message } }))
     } finally {

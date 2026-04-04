@@ -102,5 +102,8 @@ def verify_qr_api(image_path: str) -> dict:
     result["issuer"]   = data["issuer"]
     result["cert_id"]  = data["cert_id"]
     result["status"]   = data["status"]
+    # Pass name + course so json_matcher can compare against OCR output
+    result["name"]     = data.get("name", "")
+    result["course"]   = data.get("course", "")
 
     return result

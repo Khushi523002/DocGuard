@@ -8,7 +8,7 @@ def normalize(value):
 def similarity(a, b):
     return SequenceMatcher(None, a, b).ratio()
 
-def match_json(ocr_data, api_data, threshold=0.8):
+def match_json(ocr_data, api_data, threshold=0.7):
     """
     cert_id = strict match
     name, course = fuzzy match
